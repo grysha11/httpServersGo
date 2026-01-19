@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"net/http"
-	"strconv"
 	"sync/atomic"
 )
 
@@ -27,11 +26,17 @@ func handleHealthz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) handleMetrics(w http.ResponseWriter, r *http.Request) {
-	numOfReq := "Hits: " + strconv.FormatInt(int64(cfg.fileserverHits.Load()), 10)
+	numOfReq := int64(cfg.fileserverHits.Load())
+	bodyHtml := fmt.Sprintf(`<html>
+  <body>
+    <h1>Welcome, Chirpy Admin</h1>
+    <p>Chirpy has been visited %d times!</p>
+  </body>
+</html>`, numOfReq)
 
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Content-Type", "text/html")
 	w.WriteHeader(200)
-	w.Write([]byte(numOfReq))
+	w.Write([]byte(bodyHtml))
 }
 
 func (cfg *apiConfig) handleReset(w http.ResponseWriter, r *http.Request) {
@@ -50,10 +55,19 @@ func main() {
 		Handler: mux,
 	}
 	cfg := &apiConfig{}
+
+	apiRouter := http.NewServeMux()
+	apiRouter.HandleFunc("/healthz", handleHealthz)
+
+	adminRouter := http.NewServeMux()
+	adminRouter.HandleFunc("/metrics", cfg.handleMetrics)
+	adminRouter.HandleFunc("/reset", cfg.handleReset)
+
 	mux.Handle("/app/", http.StripPrefix("/app", cfg.middlewareMetricsInc(http.FileServer(http.Dir(".")))))
-	mux.HandleFunc("/healthz", handleHealthz)
-	mux.HandleFunc("/metrics", cfg.handleMetrics)
-	mux.HandleFunc("/reset", cfg.handleReset)
+	mux.Handle("/api/", http.StripPrefix("/api", apiRouter))
+	mux.Handle("/admin/", http.StripPrefix("/admin", adminRouter))
+
+	fmt.Printf("Listening on port: %v\n", server.Addr)
 	err := server.ListenAndServe()
 	fmt.Printf("Error during listen and serve: %v\n", err)
 }
