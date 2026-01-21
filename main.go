@@ -10,19 +10,37 @@ import (
 	"strings"
 	"sync/atomic"
 	"database/sql"
+	"time"
 
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
+	"github.com/google/uuid"
 )
 
+type Chirp struct {
+	ID        uuid.UUID	`json:"id"`
+	CreatedAt time.Time	`json:"created_at"`
+	UpdatedAt time.Time	`json:"updated_at"`
+	Body      string	`json:"body"`
+	UserID    uuid.UUID	`json:"user_id"`
+}
+
+type User struct {
+		ID			uuid.UUID	`json:"id"`
+		CreatedAt	time.Time	`json:"created_at"`
+		UpdatedAt	time.Time	`json:"updated_at"`
+		Email		string		`json:"email"`
+}
+
 type apiConfig struct {
-	fileserverHits	atomic.Int32
-	db				*database.Queries
+	FileserverHits	atomic.Int32
+	DB				*database.Queries
+	Platform		string
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cfg.fileserverHits.Add(1)
+		cfg.FileserverHits.Add(1)
 		next.ServeHTTP(w, r)
 	})
 }
@@ -36,7 +54,7 @@ func handleHealthz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) handleMetrics(w http.ResponseWriter, r *http.Request) {
-	numOfReq := int64(cfg.fileserverHits.Load())
+	numOfReq := int64(cfg.FileserverHits.Load())
 	bodyHtml := fmt.Sprintf(`<html>
   <body>
     <h1>Welcome, Chirpy Admin</h1>
@@ -50,8 +68,32 @@ func (cfg *apiConfig) handleMetrics(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) handleReset(w http.ResponseWriter, r *http.Request) {
-	cfg.fileserverHits.Store(0)
 	bodyText := "RESET"
+	bodyFail := "FAIL"
+	if strings.Compare(cfg.Platform, "dev") != 0 {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(403)
+		w.Write([]byte(bodyFail))
+		return
+	}
+	
+	cfg.FileserverHits.Store(0)
+	err := cfg.DB.DeleteUsers(r.Context())
+	if err != nil {
+		log.Printf("Couldn't execute db query: %v", err)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(500)
+		w.Write([]byte(bodyFail))
+		return
+	}
+	err = cfg.DB.DeleteChirps(r.Context())
+	if err != nil {
+		log.Printf("Couldn't execute db query: %v", err)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(500)
+		w.Write([]byte(bodyFail))
+		return
+	}
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(200)
@@ -73,52 +115,165 @@ func formatBody(bodyStr string) string {
 	return res
 }
 
-func handleValidateChirp(w http.ResponseWriter, r *http.Request) {
+func (cfg *apiConfig) handleUsers(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
-		Body	string	`json:"body"`
-	}
-
-	type responseBody struct {
-		ErrorStr	string	`json:"error"`
-		Valid		bool	`json:"valid"`
-		CleanedBody	string	`json:"cleaned_body"`
+		Email	string	`json:"email"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
 	params := parameters{}
 	err := decoder.Decode(&params)
 	if err != nil {
-		respErorr := responseBody{
-			ErrorStr: err.Error(),
-			Valid: false,
-			CleanedBody: "",
-		}
-		data, _ := json.Marshal(respErorr)
-		w.Header().Set("Content-Type", "application/json")
+		errorStr := fmt.Sprintf("Error occured while decoding request: %v\n", err)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(500)
-		w.Write(data)
+		w.Write([]byte(errorStr))
 		return
 	}
-	if len(params.Body) > 140 {
-		respErorr := responseBody{
-			ErrorStr: "chirp is too long",
-			Valid: false,
-			CleanedBody: "",
-		}
-		data, _ := json.Marshal(respErorr)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(400)
-		w.Write(data)
+
+	user, err := cfg.DB.CreateUser(r.Context(), params.Email)
+	if err != nil {
+		errorStr := fmt.Sprintf("Error occured while making db call: %v\n", err)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(500)
+		w.Write([]byte(errorStr))
 		return
 	}
-	respSuccess := responseBody{
-		ErrorStr: "",
-		Valid: true,
-		CleanedBody: formatBody(params.Body),
+
+	respSuccess := User{
+		ID: user.ID,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+		Email: user.Email,
 	}
 	data, err := json.Marshal(respSuccess)
 	if err != nil {
 		log.Printf("Error marshaling data: %v", err)
+		w.WriteHeader(500)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(201)
+	w.Write(data)
+}
+
+func (cfg *apiConfig) handleCreateChirps(w http.ResponseWriter, r *http.Request) {
+	type parameters struct {
+		Body	string		`json:"body"`
+		UserID	uuid.UUID	`json:"user_id"`
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err := decoder.Decode(&params)
+	if err != nil {
+		errorStr := fmt.Sprintf("Error occured while decoding request: %v\n", err)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(500)
+		w.Write([]byte(errorStr))
+		return
+	}
+
+	if len(params.Body) == 0 || params.UserID == uuid.Nil {
+		errorStr := "Error body or user_id is null"
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(400)
+		w.Write([]byte(errorStr))
+		return
+	}
+
+	chirp, err := cfg.DB.CreateChirp(r.Context(), database.CreateChirpParams{
+		Body: params.Body,
+		UserID: params.UserID,
+	})
+	if err != nil {
+		errorStr := fmt.Sprintf("Error occured while making db call: %v\n", err)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(500)
+		w.Write([]byte(errorStr))
+		return
+	}
+
+	respSuccess := Chirp{
+		ID: chirp.ID,
+		CreatedAt: chirp.CreatedAt,
+		UpdatedAt: chirp.UpdatedAt,
+		Body: chirp.Body,
+		UserID: chirp.UserID,
+	}
+	data, err := json.Marshal(respSuccess)
+	if err != nil {
+		log.Printf("Error marshaling data: %v\n", err)
+		w.WriteHeader(500)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(201)
+	w.Write(data)
+}
+
+func (cfg *apiConfig) handleGetChirps(w http.ResponseWriter, r *http.Request) {
+	chirps, err := cfg.DB.GetAllChirps(r.Context())
+	if err != nil {
+		errorStr := fmt.Sprintf("Error occured while making db call: %v\n", err)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(500)
+		w.Write([]byte(errorStr))
+		return
+	}
+
+	respSuccess := make([]Chirp, len(chirps))
+	for i, chirp := range chirps {
+		respSuccess[i] = Chirp{
+			ID: chirp.ID,
+			CreatedAt: chirp.CreatedAt,
+			UpdatedAt: chirp.UpdatedAt,
+			Body: chirp.Body,
+			UserID: chirp.UserID,
+		}
+	}
+	data, err := json.Marshal(respSuccess)
+	if err != nil {
+		log.Printf("Error marshaling data: %v\n", err)
+		w.WriteHeader(500)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	w.Write(data)
+}
+
+func (cfg *apiConfig) handleGetChirpByID(w http.ResponseWriter, r *http.Request) {
+	chirpIDString := r.PathValue("chirpID")
+
+	chirpID, err := uuid.Parse(chirpIDString)
+	if err != nil {
+		errorStr := fmt.Sprintf("Error occured while parsing uuid: %v\n", err)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(500)
+		w.Write([]byte(errorStr))
+		return
+	}
+
+	chirp, err := cfg.DB.GetChirpByID(r.Context(), chirpID)
+	if err != nil {
+		errorStr := fmt.Sprintf("Error: Couldn't find chirp with id: %v", err)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(404)
+		w.Write([]byte(errorStr))
+		return
+	}
+
+	respSuccess := Chirp{
+		ID: chirp.ID,
+		CreatedAt: chirp.CreatedAt,
+		UpdatedAt: chirp.UpdatedAt,
+		Body: chirp.Body,
+		UserID: chirp.UserID,
+	}
+	data, err := json.Marshal(respSuccess)
+	if err != nil {
+		log.Printf("Error marshaling data: %v\n", err)
 		w.WriteHeader(500)
 		return
 	}
@@ -142,19 +297,25 @@ func main() {
 		Addr: ":8080",
 		Handler: mux,
 	}
+
+	platform := os.Getenv("PLATFORM")
 	cfg := &apiConfig{
-		db: dbQueries,
+		DB: dbQueries,
+		Platform: platform,
 	}
 
 	apiRouter := http.NewServeMux()
-	apiRouter.HandleFunc("/healthz", handleHealthz)
-	apiRouter.HandleFunc("/validate_chirp", handleValidateChirp)
+	apiRouter.HandleFunc("GET /healthz", handleHealthz)
+	apiRouter.HandleFunc("POST /users", cfg.handleUsers)
+	apiRouter.HandleFunc("POST /chirps", cfg.handleCreateChirps)
+	apiRouter.HandleFunc("GET /chirps", cfg.handleGetChirps)
+	apiRouter.HandleFunc("GET /chirps/{chirpID}", cfg.handleGetChirpByID)
 
 	adminRouter := http.NewServeMux()
-	adminRouter.HandleFunc("/metrics", cfg.handleMetrics)
-	adminRouter.HandleFunc("/reset", cfg.handleReset)
+	adminRouter.HandleFunc("GET /metrics", cfg.handleMetrics)
+	adminRouter.HandleFunc("POST /reset", cfg.handleReset)
 
-	mux.Handle("/app/", http.StripPrefix("/app", cfg.middlewareMetricsInc(http.FileServer(http.Dir(".")))))
+	mux.Handle("GET /app/", http.StripPrefix("/app", cfg.middlewareMetricsInc(http.FileServer(http.Dir(".")))))
 	mux.Handle("/api/", http.StripPrefix("/api", apiRouter))
 	mux.Handle("/admin/", http.StripPrefix("/admin", adminRouter))
 
