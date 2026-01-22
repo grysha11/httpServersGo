@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"grysha11/httpServersGo/internal/database"
+	"grysha11/httpServersGo/internal/auth"
 	"log"
 	"net/http"
 	"os"
@@ -117,7 +118,8 @@ func formatBody(bodyStr string) string {
 
 func (cfg *apiConfig) handleUsers(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
-		Email	string	`json:"email"`
+		Email			string	`json:"email"`
+		Password		string	`json:"password"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
@@ -131,7 +133,19 @@ func (cfg *apiConfig) handleUsers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := cfg.DB.CreateUser(r.Context(), params.Email)
+	passwordHash, err := auth.HashPassword(params.Password)
+	if err != nil {
+		errorStr := fmt.Sprintf("Error occured while hashing password: %v\n", err)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(500)
+		w.Write([]byte(errorStr))
+		return
+	}
+
+	user, err := cfg.DB.CreateUser(r.Context(), database.CreateUserParams{
+		Email: params.Email,
+		HashedPassword: passwordHash,
+	})
 	if err != nil {
 		errorStr := fmt.Sprintf("Error occured while making db call: %v\n", err)
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -282,6 +296,66 @@ func (cfg *apiConfig) handleGetChirpByID(w http.ResponseWriter, r *http.Request)
 	w.Write(data)
 }
 
+func (cfg *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
+	type parameters struct {
+		Email		string	`json:"email"`
+		Password	string	`json:"password"`
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err := decoder.Decode(&params)
+	if err != nil {
+		errorStr := fmt.Sprintf("Error occured while decoding request: %v\n", err)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(500)
+		w.Write([]byte(errorStr))
+		return
+	}
+
+	user, err := cfg.DB.GetUserByEmail(r.Context(), params.Email)
+	if err != nil {
+		errorStr := fmt.Sprintf("Error occured while making db call: %v\n", err)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(404)
+		w.Write([]byte(errorStr))
+		return
+	}
+
+	isCorrect, err := auth.CheckPasswordHash(params.Password, user.HashedPassword)
+	if err != nil {
+		errorStr := fmt.Sprintf("Error occured while making dehashing password: %v\n", err)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(500)
+		w.Write([]byte(errorStr))
+		return
+	}
+
+	if isCorrect == false {
+		errorStr := "Password is incorrect"
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(401)
+		w.Write([]byte(errorStr))
+		return
+	}
+
+	respSuccess := User{
+		ID: user.ID,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+		Email: user.Email,
+	}
+	data, err := json.Marshal(respSuccess)
+	if err != nil {
+		log.Printf("Error marshaling data: %v\n", err)
+		w.WriteHeader(500)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	w.Write(data)
+}
+
 func main() {
 	godotenv.Load()
 	dbUrl := os.Getenv("DB_URL")
@@ -310,6 +384,7 @@ func main() {
 	apiRouter.HandleFunc("POST /chirps", cfg.handleCreateChirps)
 	apiRouter.HandleFunc("GET /chirps", cfg.handleGetChirps)
 	apiRouter.HandleFunc("GET /chirps/{chirpID}", cfg.handleGetChirpByID)
+	apiRouter.HandleFunc("POST /login", cfg.handleLogin)
 
 	adminRouter := http.NewServeMux()
 	adminRouter.HandleFunc("GET /metrics", cfg.handleMetrics)
