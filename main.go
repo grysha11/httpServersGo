@@ -31,12 +31,14 @@ type User struct {
 		CreatedAt	time.Time	`json:"created_at"`
 		UpdatedAt	time.Time	`json:"updated_at"`
 		Email		string		`json:"email"`
+		Token		string		`json:"token"`
 }
 
 type apiConfig struct {
 	FileserverHits	atomic.Int32
 	DB				*database.Queries
 	Platform		string
+	JWTSecret		string
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -174,12 +176,29 @@ func (cfg *apiConfig) handleUsers(w http.ResponseWriter, r *http.Request) {
 func (cfg *apiConfig) handleCreateChirps(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
 		Body	string		`json:"body"`
-		UserID	uuid.UUID	`json:"user_id"`
+	}
+
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		errorStr := fmt.Sprintf("Error occured while validating authentication: %v\n", err)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(401)
+		w.Write([]byte(errorStr))
+		return
+	}
+
+	userID, err := auth.ValidateJWT(token, cfg.JWTSecret)
+	if err != nil {
+		errorStr := fmt.Sprintf("Error occured while validating authentication: %v\n", err)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(401)
+		w.Write([]byte(errorStr))
+		return
 	}
 
 	decoder := json.NewDecoder(r.Body)
 	params := parameters{}
-	err := decoder.Decode(&params)
+	err = decoder.Decode(&params)
 	if err != nil {
 		errorStr := fmt.Sprintf("Error occured while decoding request: %v\n", err)
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -188,8 +207,8 @@ func (cfg *apiConfig) handleCreateChirps(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if len(params.Body) == 0 || params.UserID == uuid.Nil {
-		errorStr := "Error body or user_id is null"
+	if len(params.Body) == 0 {
+		errorStr := "Error body is null"
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(400)
 		w.Write([]byte(errorStr))
@@ -198,7 +217,7 @@ func (cfg *apiConfig) handleCreateChirps(w http.ResponseWriter, r *http.Request)
 
 	chirp, err := cfg.DB.CreateChirp(r.Context(), database.CreateChirpParams{
 		Body: params.Body,
-		UserID: params.UserID,
+		UserID: userID,
 	})
 	if err != nil {
 		errorStr := fmt.Sprintf("Error occured while making db call: %v\n", err)
@@ -298,8 +317,9 @@ func (cfg *apiConfig) handleGetChirpByID(w http.ResponseWriter, r *http.Request)
 
 func (cfg *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
-		Email		string	`json:"email"`
-		Password	string	`json:"password"`
+		Email				string	`json:"email"`
+		Password			string	`json:"password"`
+		ExpiresInSeconds	int		`json:"expires_in_seconds"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
@@ -311,6 +331,10 @@ func (cfg *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(500)
 		w.Write([]byte(errorStr))
 		return
+	}
+
+	if params.ExpiresInSeconds == 0 {
+		params.ExpiresInSeconds = 60 * 60
 	}
 
 	user, err := cfg.DB.GetUserByEmail(r.Context(), params.Email)
@@ -339,11 +363,19 @@ func (cfg *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	token, err := auth.MakeJWT(user.ID, cfg.JWTSecret, time.Second * time.Duration(params.ExpiresInSeconds))
+	if err != nil {
+		log.Printf("Error creating JWT token: %v\n", err)
+		w.WriteHeader(500)
+		return
+	}
+
 	respSuccess := User{
 		ID: user.ID,
 		CreatedAt: user.CreatedAt,
 		UpdatedAt: user.UpdatedAt,
 		Email: user.Email,
+		Token: token,
 	}
 	data, err := json.Marshal(respSuccess)
 	if err != nil {
@@ -373,9 +405,11 @@ func main() {
 	}
 
 	platform := os.Getenv("PLATFORM")
+	jwtSecret := os.Getenv("JWT_SECRET")
 	cfg := &apiConfig{
 		DB: dbQueries,
 		Platform: platform,
+		JWTSecret: jwtSecret,
 	}
 
 	apiRouter := http.NewServeMux()
