@@ -27,11 +27,12 @@ type Chirp struct {
 }
 
 type User struct {
-		ID			uuid.UUID	`json:"id"`
-		CreatedAt	time.Time	`json:"created_at"`
-		UpdatedAt	time.Time	`json:"updated_at"`
-		Email		string		`json:"email"`
-		Token		string		`json:"token"`
+		ID				uuid.UUID	`json:"id"`
+		CreatedAt		time.Time	`json:"created_at"`
+		UpdatedAt		time.Time	`json:"updated_at"`
+		Email			string		`json:"email"`
+		Token			string		`json:"token"`
+		RefreshToken	string		`json:"refresh_token"`
 }
 
 type apiConfig struct {
@@ -90,6 +91,14 @@ func (cfg *apiConfig) handleReset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	err = cfg.DB.DeleteChirps(r.Context())
+	if err != nil {
+		log.Printf("Couldn't execute db query: %v", err)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(500)
+		w.Write([]byte(bodyFail))
+		return
+	}
+	err = cfg.DB.DeleteRefreshTokens(r.Context())
 	if err != nil {
 		log.Printf("Couldn't execute db query: %v", err)
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -370,12 +379,33 @@ func (cfg *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	refreshToken, err := auth.MakeRefreshToken()
+	if err != nil {
+		log.Printf("Error creating refresh token: %v\n", err)
+		w.WriteHeader(500)
+		return
+	}
+
+	_, err = cfg.DB.CreateRefreshToken(r.Context(), database.CreateRefreshTokenParams{
+		Token: refreshToken,
+		UserID: user.ID,
+		ExpiresAt: time.Now().Add(time.Hour * 24 * 60),
+	})
+	if err != nil {
+		errorStr := fmt.Sprintf("Error occured while making db call: %v\n", err)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(500)
+		w.Write([]byte(errorStr))
+		return
+	}
+
 	respSuccess := User{
 		ID: user.ID,
 		CreatedAt: user.CreatedAt,
 		UpdatedAt: user.UpdatedAt,
 		Email: user.Email,
 		Token: token,
+		RefreshToken: refreshToken,
 	}
 	data, err := json.Marshal(respSuccess)
 	if err != nil {
@@ -386,6 +416,74 @@ func (cfg *apiConfig) handleLogin(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
 	w.Write(data)
+}
+
+func (cfg *apiConfig) handleRefresh(w http.ResponseWriter, r *http.Request) {
+	type ResponseSuccess struct {
+		Token	string	`json:"token"`
+	}
+
+	refreshToken, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		errorStr := fmt.Sprintf("Error occured while getting token: %v\n", err)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(401)
+		w.Write([]byte(errorStr))
+		return
+	}
+
+	user, err := cfg.DB.GetUserFromRefreshToken(r.Context(), refreshToken)
+	if err != nil {
+		errorStr := fmt.Sprintf("Error occured while db call: %v\n", err)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(401)
+		w.Write([]byte(errorStr))
+		return
+	}
+
+	accessToken, err := auth.MakeJWT(user.ID, cfg.JWTSecret, time.Hour)
+	if err != nil {
+		errorStr := fmt.Sprintf("Error occured while creating access token: %v\n", err)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(500)
+		w.Write([]byte(errorStr))
+		return
+	}
+
+	respSuccess := ResponseSuccess{
+		Token: accessToken,
+	}
+	data, err := json.Marshal(respSuccess)
+	if err != nil {
+		log.Printf("Error marshaling data: %v\n", err)
+		w.WriteHeader(500)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	w.Write(data)
+}
+
+func (cfg *apiConfig) handleRevoke(w http.ResponseWriter, r *http.Request) {
+	refreshToken, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		errorStr := fmt.Sprintf("Error occured while getting token: %v\n", err)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(401)
+		w.Write([]byte(errorStr))
+		return
+	}
+
+	err = cfg.DB.RevokeRefreshToken(r.Context(), refreshToken)
+	if err != nil {
+		errorStr := fmt.Sprintf("Error occured while db call: %v\n", err)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(401)
+		w.Write([]byte(errorStr))
+		return
+	}
+
+	w.WriteHeader(204)
 }
 
 func main() {
@@ -419,6 +517,8 @@ func main() {
 	apiRouter.HandleFunc("GET /chirps", cfg.handleGetChirps)
 	apiRouter.HandleFunc("GET /chirps/{chirpID}", cfg.handleGetChirpByID)
 	apiRouter.HandleFunc("POST /login", cfg.handleLogin)
+	apiRouter.HandleFunc("POST /refresh", cfg.handleRefresh)
+	apiRouter.HandleFunc("POST /revoke", cfg.handleRevoke)
 
 	adminRouter := http.NewServeMux()
 	adminRouter.HandleFunc("GET /metrics", cfg.handleMetrics)
