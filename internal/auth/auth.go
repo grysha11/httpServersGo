@@ -79,14 +79,14 @@ func ValidateJWT(tokenString, tokenSecret string) (uuid.UUID, error) {
 }
 
 func GetBearerToken(header http.Header) (string, error) {
-	BearerString := header.Get("Authorization")
-	if BearerString == "" {
+	bearerString := header.Get("Authorization")
+	if bearerString == "" {
 		return "", fmt.Errorf("no authorization provided")
 	}
-	if !strings.HasPrefix(BearerString, "Bearer ") {
+	if !strings.HasPrefix(bearerString, "Bearer ") {
 		return "", fmt.Errorf("incorrect type authorization header provided")
 	}
-	token := strings.TrimPrefix(BearerString, "Bearer ")
+	token := strings.TrimPrefix(bearerString, "Bearer ")
 	return token, nil
 }
 
@@ -98,5 +98,17 @@ func MakeRefreshToken() (string, error) {
 	}
 	token := hex.EncodeToString(key)
 	return token, nil
+}
+
+func GetAPIKey(header http.Header) (string, error) {
+	apiString := header.Get("Authorization")
+	if apiString == "" {
+		return "", fmt.Errorf("no authorization provided")
+	}
+	if !strings.HasPrefix(apiString, "ApiKey ") {
+		return "", fmt.Errorf("incorrect type authorization header provided")
+	}
+	key := strings.TrimPrefix(apiString, "ApiKey ")
+	return key, nil
 }
 
