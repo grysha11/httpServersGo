@@ -486,6 +486,139 @@ func (cfg *apiConfig) handleRevoke(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(204)
 }
 
+func (cfg *apiConfig) handlePutUsers(w http.ResponseWriter, r *http.Request) {
+	type parameters struct {
+		Email		string	`json:"email"`
+		Password	string	`json:"password"`
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err := decoder.Decode(&params)
+	if err != nil {
+		errorStr := fmt.Sprintf("Error occured while decoding request: %v\n", err)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(500)
+		w.Write([]byte(errorStr))
+		return
+	}
+
+	accessToken, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		errorStr := fmt.Sprintf("Error occured while getting token: %v\n", err)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(401)
+		w.Write([]byte(errorStr))
+		return
+	}
+
+	userID, err := auth.ValidateJWT(accessToken, cfg.JWTSecret)
+	if err != nil {
+		errorStr := fmt.Sprintf("Error occured while validating token: %v\n", err)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(401)
+		w.Write([]byte(errorStr))
+		return
+	}
+
+	passwordHash, err := auth.HashPassword(params.Password)
+	if err != nil {
+		errorStr := fmt.Sprintf("Error occured while hashing password: %v\n", err)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(500)
+		w.Write([]byte(errorStr))
+		return
+	}
+
+	user, err := cfg.DB.UpdateUserByID(r.Context(), database.UpdateUserByIDParams{
+		ID: userID,
+		Email: params.Email,
+		HashedPassword: passwordHash,
+	})
+	if err != nil {
+		errorStr := fmt.Sprintf("Error occured while making db call: %v\n", err)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(404)
+		w.Write([]byte(errorStr))
+		return
+	}
+
+	respSuccess := User{
+		ID: userID,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+		Email: user.Email,
+	}
+	data, err := json.Marshal(respSuccess)
+	if err != nil {
+		log.Printf("Error marshaling data: %v", err)
+		w.WriteHeader(500)
+		return
+	}
+	w.Header().Set("Content-type", "application/json")
+	w.WriteHeader(200)
+	w.Write(data)
+}
+
+func (cfg *apiConfig) handleDeleteChirpByID(w http.ResponseWriter, r *http.Request) {
+	chirpIDString := r.PathValue("chirpID")
+
+	chirpID, err := uuid.Parse(chirpIDString)
+	if err != nil {
+		errorStr := fmt.Sprintf("Error occured while parsing uuid: %v\n", err)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(500)
+		w.Write([]byte(errorStr))
+		return
+	}
+
+	accessToken, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		errorStr := fmt.Sprintf("Error occured while getting token: %v\n", err)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(401)
+		w.Write([]byte(errorStr))
+		return
+	}
+
+	userID, err := auth.ValidateJWT(accessToken, cfg.JWTSecret)
+	if err != nil {
+		errorStr := fmt.Sprintf("Error occured while validating token: %v\n", err)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(401)
+		w.Write([]byte(errorStr))
+		return
+	}
+
+	chirp, err := cfg.DB.GetChirpByID(r.Context(), chirpID)
+	if err != nil {
+		errorStr := fmt.Sprintf("Error occured while making db call: %v\n", err)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(404)
+		w.Write([]byte(errorStr))
+		return
+	}
+
+	if chirp.UserID != userID {
+		errorStr := "Error, you are not a creator of a chirp."
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(403)
+		w.Write([]byte(errorStr))
+		return
+	}
+
+	err = cfg.DB.DeleteChirpByID(r.Context(), chirpID)
+	if err != nil {
+		errorStr := fmt.Sprintf("Error occured while making db call: %v\n", err)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(500)
+		w.Write([]byte(errorStr))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(204)
+}
+
 func main() {
 	godotenv.Load()
 	dbUrl := os.Getenv("DB_URL")
@@ -519,6 +652,8 @@ func main() {
 	apiRouter.HandleFunc("POST /login", cfg.handleLogin)
 	apiRouter.HandleFunc("POST /refresh", cfg.handleRefresh)
 	apiRouter.HandleFunc("POST /revoke", cfg.handleRevoke)
+	apiRouter.HandleFunc("PUT /users", cfg.handlePutUsers)
+	apiRouter.HandleFunc("DELETE /chirps/{chirpID}", cfg.handleDeleteChirpByID)
 
 	adminRouter := http.NewServeMux()
 	adminRouter.HandleFunc("GET /metrics", cfg.handleMetrics)
