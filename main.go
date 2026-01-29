@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"database/sql"
 	"time"
+	"slices"
 
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
@@ -258,13 +259,37 @@ func (cfg *apiConfig) handleCreateChirps(w http.ResponseWriter, r *http.Request)
 }
 
 func (cfg *apiConfig) handleGetChirps(w http.ResponseWriter, r *http.Request) {
-	chirps, err := cfg.DB.GetAllChirps(r.Context())
-	if err != nil {
-		errorStr := fmt.Sprintf("Error occured while making db call: %v\n", err)
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.WriteHeader(500)
-		w.Write([]byte(errorStr))
-		return
+	authorIDString := r.URL.Query().Get("author_id")
+	sort := r.URL.Query().Get("sort")
+
+	var chirps []database.Chirp
+	var err error
+
+	if authorIDString != "" {
+		authorID, err := uuid.Parse(authorIDString)
+		if err != nil {
+			w.WriteHeader(400)
+			w.Write([]byte("Invalid author ID"))
+			return
+		}
+
+		chirps, err = cfg.DB.GetChirpsByAuthor(r.Context(), authorID)
+		if err != nil {
+			errorStr := fmt.Sprintf("Error occured while making db call: %v\n", err)
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.WriteHeader(500)
+			w.Write([]byte(errorStr))
+			return
+		}
+	} else {
+		chirps, err = cfg.DB.GetAllChirps(r.Context())
+		if err != nil {
+			errorStr := fmt.Sprintf("Error occured while making db call: %v\n", err)
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.WriteHeader(500)
+			w.Write([]byte(errorStr))
+			return
+		}
 	}
 
 	respSuccess := make([]Chirp, len(chirps))
@@ -277,6 +302,13 @@ func (cfg *apiConfig) handleGetChirps(w http.ResponseWriter, r *http.Request) {
 			UserID: chirp.UserID,
 		}
 	}
+
+	if sort == "desc" {
+		slices.SortFunc(respSuccess, func(a, b Chirp) int {
+			return b.CreatedAt.Compare(a.CreatedAt)
+		})
+	}
+
 	data, err := json.Marshal(respSuccess)
 	if err != nil {
 		log.Printf("Error marshaling data: %v\n", err)
