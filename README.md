@@ -1,4 +1,3 @@
-```markdown
 # Chirpy Backend API (httpServersGo)
 
 A robust, modular RESTful API built in Go. This serves as the backend for "Chirpy" (a social microblogging platform), featuring user authentication, post (chirp) creation, and admin metrics, all backed by a PostgreSQL database.
