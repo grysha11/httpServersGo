@@ -22,16 +22,20 @@ A robust, modular RESTful API built in Go. This serves as the backend for "Chirp
 
 This project follows a domain-driven, standard Go application layout:
 
-`├── cmd/server/` - Application entrypoint
-`├── internal/` - Private application code
-`│   ├── auth/` - Hashing and JWT logic
-`│   ├── config/` - Shared application state (DB pool, secrets)
-`│   ├── database/` - SQLC-generated database access code
-`│   ├── handler/` - HTTP handlers grouped by domain (users, chirps, etc.)
-`│   ├── middleware/` - Reusable HTTP request filters (auth, metrics)
-`│   └── router/` - API route definitions
-`├── sql/` - Database schemas and queries for SQLC/Goose
-`└── index.html` - Static frontend entry file
+```text
+.
+├── cmd/server/` - Application entrypoint
+├── internal/` - Private application code
+│   ├── auth/` - Hashing and JWT logic
+│   ├── config/` - Shared application state (DB pool, secrets)
+│   ├── database/` - SQLC-generated database access code
+│   ├── handler/` - HTTP handlers grouped by domain (users, chirps, etc.)
+│   ├── middleware/` - Reusable HTTP request filters (auth, metrics)
+│   └── router/` - API route definitions
+├── sql/` - Database schemas and queries for SQLC/Goose
+└── index.html` - Static frontend entry file
+
+```
 
 ## Local Development Setup
 
